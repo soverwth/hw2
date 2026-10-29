@@ -1,5 +1,7 @@
 # Simple Workflow MVP
 
+> 当前版本：**v2.0.0**（更新说明见 [CHANGELOG.md](./CHANGELOG.md)）
+
 一个轻量级 **多 Agent 协作工作流**（Workflow）MVP，用于理解 **Workflow 编排、Agent 间通信、状态管理** 三大核心概念。仅依赖 Python 标准库，零第三方依赖，开箱即用。
 
 ## 项目亮点
@@ -32,6 +34,7 @@ simple-workflow-mvp/
 ├── tests/
 │   └── test_workflow.py         # 单元测试
 ├── requirements.txt             # 无第三方依赖
+├── CHANGELOG.md                 # 更新日志
 └── README.md / Design.md        # 文档
 ```
 

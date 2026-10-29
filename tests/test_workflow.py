@@ -18,7 +18,9 @@ from workflow import (  # noqa: E402
     Agent,
     CodingAgent,
     DesignAgent,
+    FixAgent,
     RequirementAgent,
+    ReviewAgent,
     Step,
     Workflow,
     WorkflowContext,
@@ -135,6 +137,84 @@ class TestErrorHandling(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             wf.run()
         self.assertEqual(wf.context.status_of("t"), "FAILED")
+
+    def test_parallel_failure_marks_failed(self):
+        ctx = WorkflowContext()
+        wf = Workflow("t")
+        wf.parallel(
+            "P",
+            [Step("a", EchoAgent("AgentA", "a", 1)), Step("boom", BoomAgent())],
+        )
+        with self.assertRaises(RuntimeError):
+            wf.run(ctx)
+        self.assertEqual(ctx.status_of("P"), "FAILED")
+        # 成功的子节点结果仍被记录
+        self.assertEqual(ctx.get("a"), 1)
+
+
+class TestValidation(unittest.TestCase):
+    def test_step_max_retries_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            Step("x", EchoAgent("A", "x", 1), max_retries=0)
+
+    def test_step_on_error_must_be_valid(self):
+        with self.assertRaises(ValueError):
+            Step("x", EchoAgent("A", "x", 1), on_error="skip")
+
+
+class TestReviewAndFix(unittest.TestCase):
+    def test_review_does_not_flag_pass_substring(self):
+        code = "def foo(self):\n    return 'compass and bypass'\n"
+        ctx = WorkflowContext({"code": code})
+        ReviewAgent().run(ctx)
+        self.assertNotIn("存在空实现（pass）", ctx.get("review_issues"))
+
+    def test_review_flags_standalone_pass(self):
+        code = "def foo(self):\n    pass\n"
+        ctx = WorkflowContext({"code": code})
+        ReviewAgent().run(ctx)
+        self.assertIn("存在空实现（pass）", ctx.get("review_issues"))
+
+    def test_fix_divide_preserves_indentation(self):
+        code = "class C:\n  def divide(self, a, b):\n    return a / b\n"
+        ctx = WorkflowContext({"code": code, "review_issues": ["除法未处理除数为零的情况"]})
+        FixAgent().run(ctx)
+        fixed = ctx.get("code")
+        self.assertIn("if b == 0:", fixed)
+        self.assertIn("raise ValueError", fixed)
+        # 修复后的代码应可编译
+        ns: dict = {}
+        exec(compile(fixed, "<t>", "exec"), ns)
+
+    def test_fix_pass_becomes_raise(self):
+        code = "class C:\n    def f(self):\n        pass\n"
+        ctx = WorkflowContext({"code": code, "review_issues": ["存在空实现（pass）"]})
+        FixAgent().run(ctx)
+        fixed = ctx.get("code")
+        self.assertIn("raise NotImplementedError", fixed)
+        self.assertNotIn("pass", fixed)
+        # 修复后的代码应可编译（不会出现“函数体只剩注释”）
+        ns: dict = {}
+        exec(compile(fixed, "<t>", "exec"), ns)
+
+    def test_fix_log_accumulates_across_rounds(self):
+        code = "class C:\n    def divide(self, a, b):\n        return a / b\n"
+        ctx = WorkflowContext({"code": code, "review_issues": ["除法未处理除数为零的情况"]})
+        FixAgent().run(ctx)
+        # 第二轮：无问题可修，不应覆盖上一轮的修复记录
+        ctx.set("review_issues", [])
+        FixAgent().run(ctx)
+        self.assertEqual(ctx.get("fix_log"), ["补充除零校验（1 处）"])
+
+
+class TestDumpJson(unittest.TestCase):
+    def test_dump_json_creates_parent_dirs(self):
+        project_root = Path(__file__).resolve().parent.parent
+        target = os.path.join(str(project_root), "_test_output", "logs", "a", "b.json")
+        ctx = WorkflowContext({"x": 1})
+        ctx.dump_json(target)
+        self.assertTrue(os.path.exists(target))
+        shutil.rmtree(os.path.join(str(project_root), "_test_output"), ignore_errors=True)
 
 
 class TestMiniSEEndToEnd(unittest.TestCase):

@@ -12,7 +12,14 @@ from __future__ import annotations
 import json
 import sys
 
-from workflow import Workflow, WorkflowContext, RequirementAgent, DesignAgent, CodingAgent
+from workflow import (
+    Workflow,
+    WorkflowContext,
+    RequirementAgent,
+    DesignAgent,
+    CodingAgent,
+    __version__,
+)
 
 INPUT = (
     "实现一个计算器程序，支持加法、减法、乘法、除法四种运算，"
@@ -29,6 +36,8 @@ def build_workflow() -> Workflow:
 
 
 def main() -> int:
+    print(f"Simple Workflow MVP v{__version__}")
+    print()
     ctx = WorkflowContext({"input": INPUT, "output_dir": "generated"})
     wf = build_workflow()
 

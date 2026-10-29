@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List
 
 from .agent import Agent
@@ -24,6 +25,15 @@ _OPERATION_MAP = {
     "除法": ("divide", "a / b", "两个数相除"),
 }
 
+# 匹配独立的 pass 语句（整行只有 pass 及可选注释，捕获缩进）
+_PASS_LINE_RE = re.compile(r"^([ \t]*)pass[ \t]*(?:#.*)?$", re.MULTILINE)
+# 匹配独立的 TODO 标记（单词边界）
+_TODO_RE = re.compile(r"\bTODO\b")
+# 匹配 divide 方法定义
+_DIVIDE_DEF_RE = re.compile(r"def\s+divide\s*\(")
+# 匹配 return a / b 行（捕获缩进）
+_RETURN_DIVIDE_RE = re.compile(r"^([ \t]*)return a / b[ \t]*$", re.MULTILINE)
+
 
 class RequirementAgent(Agent):
     """需求 Agent：把自然语言需求整理为结构化需求。"""
@@ -32,7 +42,7 @@ class RequirementAgent(Agent):
 
     def run(self, ctx: WorkflowContext) -> Dict[str, Any]:
         raw = ctx.get("input", "")
-        sentences = [s.strip() for s in raw.replace("\n", " ").split("。") if s.strip()]
+        sentences = [s.strip() for s in re.split(r"[。！？!?；;\n]+", raw) if s.strip()]
         overview = sentences[0] if sentences else raw.strip()
 
         features = []
@@ -136,7 +146,10 @@ class CodingAgent(Agent):
         lines.append("")
         lines.append("if __name__ == '__main__':")
         lines.append("    calc = Calculator()")
-        lines.append("    print(calc.add(1, 2))")
+        if any(f["方法"] == "add" for f in features):
+            lines.append("    print(calc.add(1, 2))")
+        else:
+            lines.append("    print('Calculator 已生成')")
         return "\n".join(lines)
 
     @staticmethod
@@ -193,11 +206,11 @@ class ReviewAgent(Agent):
     def run(self, ctx: WorkflowContext) -> Dict[str, Any]:
         code = ctx.get("code", "")
         issues: List[str] = []
-        if "TODO" in code:
+        if _TODO_RE.search(code):
             issues.append("代码中包含未完成的 TODO")
-        if "pass" in code:
+        if _PASS_LINE_RE.search(code):
             issues.append("存在空实现（pass）")
-        if "divide" in code and "ValueError" not in code:
+        if _DIVIDE_DEF_RE.search(code) and "ValueError" not in code:
             issues.append("除法未处理除数为零的情况")
         ctx.set("review_issues", issues)
         self.send(ctx, "FixAgent", {"issues": issues}, msg_type="review")
@@ -214,20 +227,25 @@ class FixAgent(Agent):
         issues = list(ctx.get("review_issues", []))
         fixed: List[str] = []
         for issue in issues:
-            if "TODO" in issue and "TODO" in code:
-                code = code.replace("TODO", "DONE")
-                fixed.append("移除 TODO 标记")
-            if "空实现" in issue and "pass" in code:
-                code = code.replace("pass", "# 实现占位：已补充说明")
-                fixed.append("补充空实现说明")
-            if "除数为零" in issue:
-                if "ValueError" not in code:
-                    code = code.replace(
-                        "return a / b",
-                        'if b == 0:\n            raise ValueError("除数为零")\n        return a / b',
-                    )
-                    fixed.append("补充除零校验")
+            if "TODO" in issue:
+                new_code, n = _TODO_RE.subn("DONE", code)
+                if n:
+                    code = new_code
+                    fixed.append(f"移除 TODO 标记（{n} 处）")
+            if "空实现" in issue:
+                new_code, n = _PASS_LINE_RE.subn(r"\1raise NotImplementedError('待补充实现')", code)
+                if n:
+                    code = new_code
+                    fixed.append(f"空实现改为 raise NotImplementedError（{n} 处）")
+            if "除数为零" in issue and "ValueError" not in code:
+                new_code, n = _RETURN_DIVIDE_RE.subn(
+                    r'\1if b == 0:\n\1    raise ValueError("除数为零")\n\1return a / b', code
+                )
+                if n:
+                    code = new_code
+                    fixed.append(f"补充除零校验（{n} 处）")
         ctx.set("code", code)
-        ctx.set("fix_log", fixed)
+        # 累积修复记录，避免多轮循环中最后一轮（无问题可修时）覆盖历史
+        ctx.set("fix_log", ctx.get("fix_log", []) + fixed)
         self.send(ctx, "ReviewAgent", {"fixed": fixed}, msg_type="fix")
         return {"fixed": fixed}

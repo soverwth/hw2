@@ -6,12 +6,15 @@
 - Workflow/Step/LoopStep/ParallelStep：编排引擎（顺序/条件/循环/并行）
 """
 
+__version__ = "2.0.0"
+
 from .context import Message, WorkflowContext, WorkflowStatus
 from .agent import Agent
 from .engine import Node, Step, LoopStep, ParallelStep, Workflow
 from .agents import RequirementAgent, DesignAgent, CodingAgent, ReviewAgent, FixAgent
 
 __all__ = [
+    "__version__",
     "Message",
     "WorkflowContext",
     "WorkflowStatus",

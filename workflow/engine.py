@@ -11,8 +11,8 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Dict, List, Optional
 
 from .agent import Agent
 from .context import WorkflowContext, WorkflowStatus
@@ -35,7 +35,7 @@ class Step(Node):
         name        节点名称（用于日志与状态追踪）
         agent       要执行的 Agent 实例
         condition   可选守卫 ``callable(ctx) -> bool``，返回 False 时跳过本节点
-        max_retries 失败后的最大重试次数
+        max_retries 失败后的最大重试次数（>= 1）
         on_error    重试耗尽后的策略："raise"（默认，抛出）或 "continue"（记录后继续）
     """
 
@@ -48,6 +48,10 @@ class Step(Node):
         on_error: str = "raise",
     ) -> None:
         super().__init__(name)
+        if not isinstance(max_retries, int) or max_retries < 1:
+            raise ValueError(f"max_retries 必须是 >= 1 的整数，收到: {max_retries!r}")
+        if on_error not in ("raise", "continue"):
+            raise ValueError(f"on_error 必须是 'raise' 或 'continue'，收到: {on_error!r}")
         self.agent = agent
         self.condition = condition
         self.max_retries = max_retries
@@ -83,7 +87,7 @@ class Step(Node):
                 error = exc
                 ctx.log("error", f"[{self.name}] 第 {attempt} 次执行失败: {exc}")
 
-        # 重试耗尽
+        # 重试耗尽（此时 error 必为最近一次异常）
         if self.on_error == "raise":
             ctx.set_node_status(self.name, WorkflowStatus.FAILED, agent=self.agent.name, error=str(error))
             raise error  # type: ignore[misc]
@@ -95,7 +99,10 @@ class Step(Node):
 
 
 class LoopStep(Node):
-    """循环节点：反复执行一组子节点，直到 ``while_condition`` 不再成立或达到 ``max_iterations``。"""
+    """循环节点：反复执行一组子节点，直到 ``while_condition`` 不再成立或达到 ``max_iterations``。
+
+    语义为 do-while：先执行一轮子节点，再判断是否继续。
+    """
 
     def __init__(
         self,
@@ -105,6 +112,8 @@ class LoopStep(Node):
         max_iterations: int = 5,
     ) -> None:
         super().__init__(name)
+        if not isinstance(max_iterations, int) or max_iterations < 1:
+            raise ValueError(f"max_iterations 必须是 >= 1 的整数，收到: {max_iterations!r}")
         self.nodes = nodes
         self.while_condition = while_condition
         self.max_iterations = max_iterations
@@ -130,20 +139,34 @@ class ParallelStep(Node):
     """并行节点：并发执行一组互不依赖的子节点。
 
     注意：并行子节点应写入互不冲突的共享状态键。
+    任一子节点失败时，等待其余子节点完成后抛出异常，并记录 FAILED 状态。
     """
 
     def __init__(self, name: str, nodes: List[Node]) -> None:
         super().__init__(name)
         self.nodes = nodes
 
-    def execute(self, ctx: WorkflowContext) -> dict:
+    def execute(self, ctx: WorkflowContext) -> Dict[str, Any]:
+        node_names = [n.name for n in self.nodes]
+        ctx.set_node_status(self.name, WorkflowStatus.RUNNING, nodes=node_names)
         ctx.log("info", f"[{self.name}] 并行执行 {len(self.nodes)} 个节点")
+
+        results: Dict[str, Any] = {}
+        errors: Dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=max(1, len(self.nodes))) as executor:
             future_to_node = {executor.submit(node.execute, ctx): node for node in self.nodes}
-            results = {}
-            for future in future_to_node:
+            for future in as_completed(future_to_node):
                 node = future_to_node[future]
-                results[node.name] = future.result()  # 子节点异常会在此处向上抛出
+                try:
+                    results[node.name] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    errors[node.name] = str(exc)
+                    ctx.log("error", f"[{self.name}] 子节点 {node.name} 执行失败: {exc}")
+
+        if errors:
+            ctx.set_node_status(self.name, WorkflowStatus.FAILED, nodes=node_names, errors=errors)
+            raise RuntimeError(f"并行节点 {self.name} 有子节点失败: {errors}")
+
         ctx.set_node_status(self.name, WorkflowStatus.SUCCEEDED, nodes=sorted(results.keys()))
         return results
 
@@ -188,7 +211,9 @@ class Workflow:
                 node.execute(ctx)
             ctx.set_node_status(self.name, WorkflowStatus.SUCCEEDED, duration=round(time.time() - started, 3))
         except Exception as exc:  # noqa: BLE001
-            ctx.set_node_status(self.name, WorkflowStatus.FAILED, error=str(exc))
+            ctx.set_node_status(
+                self.name, WorkflowStatus.FAILED, error=str(exc), duration=round(time.time() - started, 3)
+            )
             ctx.log("error", f"Workflow[{self.name}] 执行失败: {exc}")
             raise
         finally:

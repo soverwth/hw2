@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -128,7 +129,13 @@ class WorkflowContext:
         }
 
     def dump_json(self, path: str) -> str:
-        """把完整执行记录导出为 JSON 文件，便于审计与复现。"""
+        """把完整执行记录导出为 JSON 文件，便于审计与复现。
+
+        若目标目录不存在，会自动创建。
+        """
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=2, default=str)
         return path
